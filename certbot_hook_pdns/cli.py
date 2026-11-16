@@ -42,13 +42,23 @@ def challenge_fqdn(domain: str) -> str:
 
 
 def bump_serial(lines: list[str]) -> None:
-    """Increment the serial field of the zone's SOA line, in place."""
+    """Set the zone's SOA serial to the current UNIX time, in place.
+
+    The zone carries SOA-EDIT=INCEPTION-EPOCH, so pdns *serves*
+    max(file serial, epoch of the last Thursday 00:00 UTC). A plain +1 on
+    a file serial that has fallen behind that weekly value is invisible:
+    the served serial never changes, the secondaries never AXFR, and the
+    TXT record never appears on the public NS. Writing the epoch time is
+    INCEPTION-EPOCH's documented contract; the max() keeps the serial
+    monotonic across two runs in the same second or a clock step back.
+    """
     for i, line in enumerate(lines):
         fields = line.split()
         if "SOA" in fields:
             soa_idx = fields.index("SOA")
             serial_idx = soa_idx + 3  # SOA <primary> <hostmaster> <serial>
-            fields[serial_idx] = str(int(fields[serial_idx]) + 1)
+            old = int(fields[serial_idx])
+            fields[serial_idx] = str(max(old + 1, int(time.time())))
             lines[i] = " ".join(fields)
             return
     raise SystemExit(f"no SOA line found in {ZONE_FILE}")
