@@ -13,35 +13,57 @@ The zone file is generator-owned; challenge lines are transient
 (cleanup removes them; a generator redeploy also restores canonical
 content). certbot runs renewals sequentially, so file edits don't race.
 
+The zone (and its file) is looked up from the pdns bind-backend config,
+so the same hook serves every site: welland.mithis.com on ten64.welland,
+monarto.mithis.com on ten64.monarto.
+
 Usage (from /etc/letsencrypt/renewal/*.conf):
   manual_auth_hook    = /opt/certbot/bin/certbot-hook-pdns auth-hook
   manual_cleanup_hook = /opt/certbot/bin/certbot-hook-pdns cleanup-hook
 """
 
 import os
+import re
 import subprocess
 import sys
 import time
 
-ZONE = "welland.mithis.com"
-ZONE_FILE = f"/etc/powerdns/zones-external/{ZONE}.zone"
 CONFIG = "external"
+BIND_CONF = f"/etc/powerdns/bind-{CONFIG}.conf"
 SOCKET_DIR = f"/var/run/pdns-{CONFIG}"
 PUBLIC_NS = "ns1.rollernet.us"
 WAIT_SECONDS = 240
+
+# zone "name" { ... file "path"; ... };
+_ZONE_RE = re.compile(
+    r'zone\s+"(?P<zone>[^"]+)"\s*\{[^}]*?file\s+"(?P<file>[^"]+)"', re.S)
 
 
 def run(*argv: str) -> None:
     subprocess.run(argv, check=True, capture_output=True, text=True)
 
 
+def find_zone(domain: str, bind_conf: str = BIND_CONF) -> tuple[str, str]:
+    """Return (zone, zone_file) for the longest zone in bind_conf that
+    contains domain, matching on a label boundary."""
+    with open(bind_conf) as fh:
+        text = fh.read()
+    best: tuple[str, str] | None = None
+    for m in _ZONE_RE.finditer(text):
+        zone = m.group("zone").rstrip(".")
+        if domain == zone or domain.endswith(f".{zone}"):
+            if best is None or len(zone) > len(best[0]):
+                best = (zone, m.group("file"))
+    if best is None:
+        raise SystemExit(f"domain {domain!r} is in no zone of {bind_conf}")
+    return best
+
+
 def challenge_fqdn(domain: str) -> str:
-    if not (domain == ZONE or domain.endswith(f".{ZONE}")):
-        raise SystemExit(f"domain {domain!r} not under {ZONE}")
     return f"_acme-challenge.{domain}"
 
 
-def bump_serial(lines: list[str]) -> None:
+def bump_serial(lines: list[str], zone_file: str = "<zone file>") -> None:
     """Set the zone's SOA serial to the current UNIX time, in place.
 
     The zone carries SOA-EDIT=INCEPTION-EPOCH, so pdns *serves*
@@ -61,13 +83,13 @@ def bump_serial(lines: list[str]) -> None:
             fields[serial_idx] = str(max(old + 1, int(time.time())))
             lines[i] = " ".join(fields)
             return
-    raise SystemExit(f"no SOA line found in {ZONE_FILE}")
+    raise SystemExit(f"no SOA line found in {zone_file}")
 
 
-def edit_zone(fqdn: str, add_token: str | None) -> None:
+def edit_zone(zone_file: str, fqdn: str, add_token: str | None) -> None:
     """Append a TXT for fqdn (auth) or drop all its TXT lines (cleanup),
     bumping the serial either way. Atomic replace."""
-    with open(ZONE_FILE) as fh:
+    with open(zone_file) as fh:
         lines = fh.read().splitlines()
     if add_token is not None:
         lines.append(f'{fqdn}. 60 IN TXT "{add_token}"')
@@ -76,19 +98,19 @@ def edit_zone(fqdn: str, add_token: str | None) -> None:
             line for line in lines
             if not (line.startswith(f"{fqdn}. ") and " TXT " in line)
         ]
-    bump_serial(lines)
-    tmp = f"{ZONE_FILE}.acme-tmp"
+    bump_serial(lines, zone_file)
+    tmp = f"{zone_file}.acme-tmp"
     with open(tmp, "w") as fh:
         fh.write("\n".join(lines) + "\n")
     os.chmod(tmp, 0o644)
-    os.replace(tmp, ZONE_FILE)
+    os.replace(tmp, zone_file)
 
 
-def reload_and_notify() -> None:
+def reload_and_notify(zone: str) -> None:
     run("pdns_control", f"--config-name={CONFIG}",
-        f"--socket-dir={SOCKET_DIR}", "bind-reload-now", ZONE)
+        f"--socket-dir={SOCKET_DIR}", "bind-reload-now", zone)
     run("pdns_control", f"--config-name={CONFIG}",
-        f"--socket-dir={SOCKET_DIR}", "notify", ZONE)
+        f"--socket-dir={SOCKET_DIR}", "notify", zone)
 
 
 def wait_for_public(fqdn: str, token: str) -> None:
@@ -110,16 +132,17 @@ def wait_for_public(fqdn: str, token: str) -> None:
 def main() -> None:
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     domain = os.environ["CERTBOT_DOMAIN"]
+    zone, zone_file = find_zone(domain)
     fqdn = challenge_fqdn(domain)
 
     if mode == "auth-hook":
         token = os.environ["CERTBOT_VALIDATION"]
-        edit_zone(fqdn, token)
-        reload_and_notify()
+        edit_zone(zone_file, fqdn, token)
+        reload_and_notify(zone)
         wait_for_public(fqdn, token)
     elif mode == "cleanup-hook":
-        edit_zone(fqdn, None)
-        reload_and_notify()
+        edit_zone(zone_file, fqdn, None)
+        reload_and_notify(zone)
     else:
         raise SystemExit(f"unknown mode {mode!r} (auth-hook|cleanup-hook)")
 
