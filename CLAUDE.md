@@ -6,10 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Certbot DNS-01 `--manual-auth-hook` / `--manual-cleanup-hook` for a PowerDNS
 **bind-backend hidden primary** whose zone is published by external
-secondaries (Rollernet for `welland.mithis.com`). Distributed as a Python
-package with a `certbot-hook-pdns` CLI entry point.
+secondaries (Rollernet for `welland.mithis.com` and `monarto.mithis.com`).
+Distributed as a Python package with a `certbot-hook-pdns` CLI entry point.
 
-Deployed on `ten64.welland.mithis.com` inside the certbot venv:
+Deployed on both Ten64 routers (`ten64.welland.mithis.com`,
+`ten64.monarto.mithis.com`) inside the certbot venv:
 `/opt/certbot/hooks/certbot-hook-pdns` (git clone) installed editable, giving
 `/opt/certbot/bin/certbot-hook-pdns`. The venv self-heal in
 `/etc/certbot/renew-guarded` preserves `hooks/` and reinstalls every package
@@ -30,13 +31,17 @@ pyproject.toml
 
 ## How it works
 
-`cli.py` `main()` dispatches on `argv[1]`:
+`cli.py` `main()` first calls `find_zone(CERTBOT_DOMAIN)`, which parses
+`/etc/powerdns/bind-external.conf` and returns the longest declared zone
+containing the domain (label-boundary match) together with its zone file.
+Nothing site-specific is hardcoded: the same code runs on welland and
+monarto. It then dispatches on `argv[1]`:
 
-- `auth-hook`: `edit_zone(fqdn, token)` appends a 60 s TXT line and rewrites
-  the SOA serial, `reload_and_notify()` runs `pdns_control bind-reload-now`
+- `auth-hook`: `edit_zone(zone_file, fqdn, token)` appends a 60 s TXT line and rewrites
+  the SOA serial, `reload_and_notify(zone)` runs `pdns_control bind-reload-now`
   then `notify`, `wait_for_public()` polls `dig @ns1.rollernet.us` for up to
   240 s and exits 1 if the token never appears.
-- `cleanup-hook`: `edit_zone(fqdn, None)` drops all TXT lines for the fqdn,
+- `cleanup-hook`: `edit_zone(zone_file, fqdn, None)` drops all TXT lines for the fqdn,
   rewrites the serial, reload + notify. No wait.
 
 The zone file is **generator-owned** (gdoc2netcfg writes it on deploy, with

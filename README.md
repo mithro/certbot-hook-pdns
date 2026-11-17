@@ -51,8 +51,12 @@ manual_auth_hook = /path/to/certbot-hook-pdns auth-hook
 manual_cleanup_hook = /path/to/certbot-hook-pdns cleanup-hook
 ```
 
-Zone, zone-file path, pdns config name, public nameserver and wait time are
-module constants in `certbot_hook_pdns/cli.py`.
+The zone and its file are looked up from the pdns bind-backend config
+(`/etc/powerdns/bind-external.conf`): the longest declared zone that
+contains `CERTBOT_DOMAIN` wins, so one install serves every zone on the
+host and the same package deploys to every site. The pdns config name,
+public nameserver and wait time are module constants in
+`certbot_hook_pdns/cli.py`.
 
 ## Licence
 
