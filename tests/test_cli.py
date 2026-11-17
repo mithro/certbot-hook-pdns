@@ -41,3 +41,63 @@ class TestBumpSerial:
     def test_no_soa_line_is_an_error(self):
         with pytest.raises(SystemExit):
             cli.bump_serial(["a. 60 IN A 10.0.0.1"])
+
+
+class TestFindZone:
+    """The hook runs on more than one site (welland, monarto), each with
+    its own zone. The zone and its file come from the pdns bind-backend
+    config rather than a constant, so one deployment fits every site."""
+
+    CONF = (
+        'zone "welland.mithis.com" { type primary; '
+        'file "/etc/powerdns/zones-external/welland.mithis.com.zone"; };\n'
+        'zone "birds.mithis.com" { type primary; '
+        'file "/etc/powerdns/zones-external/birds.mithis.com.zone"; };\n'
+    )
+
+    def write_conf(self, tmp_path, text=None):
+        conf = tmp_path / "bind-external.conf"
+        conf.write_text(self.CONF if text is None else text)
+        return str(conf)
+
+    def test_subdomain_maps_to_its_zone_and_file(self, tmp_path):
+        conf = self.write_conf(tmp_path)
+        zone, zone_file = cli.find_zone("ten64.welland.mithis.com", conf)
+        assert zone == "welland.mithis.com"
+        assert zone_file == "/etc/powerdns/zones-external/welland.mithis.com.zone"
+
+    def test_apex_maps_to_itself(self, tmp_path):
+        conf = self.write_conf(tmp_path)
+        zone, _ = cli.find_zone("birds.mithis.com", conf)
+        assert zone == "birds.mithis.com"
+
+    def test_longest_matching_zone_wins(self, tmp_path):
+        conf = self.write_conf(tmp_path, (
+            'zone "mithis.com" { type primary; file "/z/mithis.com.zone"; };\n'
+            'zone "welland.mithis.com" { type primary; '
+            'file "/z/welland.mithis.com.zone"; };\n'
+        ))
+        zone, zone_file = cli.find_zone("bmc.x.welland.mithis.com", conf)
+        assert zone == "welland.mithis.com"
+        assert zone_file == "/z/welland.mithis.com.zone"
+
+    def test_label_boundary_is_respected(self, tmp_path):
+        # "notwelland.mithis.com" ends with "welland.mithis.com" as a string
+        # but is not inside that zone.
+        conf = self.write_conf(tmp_path)
+        with pytest.raises(SystemExit):
+            cli.find_zone("notwelland.mithis.com", conf)
+
+    def test_domain_outside_every_zone_is_an_error(self, tmp_path):
+        conf = self.write_conf(tmp_path)
+        with pytest.raises(SystemExit):
+            cli.find_zone("example.org", conf)
+
+    def test_monarto_conf(self, tmp_path):
+        conf = self.write_conf(tmp_path, (
+            'zone "monarto.mithis.com" { type primary; '
+            'file "/etc/powerdns/zones-external/monarto.mithis.com.zone"; };\n'
+        ))
+        zone, zone_file = cli.find_zone("ten64.monarto.mithis.com", conf)
+        assert zone == "monarto.mithis.com"
+        assert zone_file.endswith("/monarto.mithis.com.zone")
